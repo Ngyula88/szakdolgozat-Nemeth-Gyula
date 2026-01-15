@@ -82,6 +82,21 @@ public class NetworkMonitor extends JFrame {
     private JButton anycastCloudflareButton;
     private JButton anycastGoogleButton;
 
+
+    // Packet test loop controls (run until stopped)
+    private volatile boolean unicastUdpRunning = false;
+    private volatile boolean broadcastRunning = false;
+    private volatile boolean multicastRunning = false;
+    private volatile boolean anycastRunning = false;
+
+    private Future<?> unicastUdpFuture;
+    private Future<?> broadcastFuture;
+    private Future<?> multicastFuture;
+    private Future<?> anycastFuture;
+
+    private String anycastIpRunning = null;
+    private String anycastUrlRunning = null;
+
     private JTextArea packetTestArea;
     private PacketGraphPanel packetGraphPanel;
 
@@ -1026,7 +1041,29 @@ public class NetworkMonitor extends JFrame {
             JOptionPane.showMessageDialog(this, "Adj meg egy hostot!", "Hiba", JOptionPane.ERROR_MESSAGE);
             return;
         }
-        backgroundExec.submit(() -> unicastUdpTest(host, port));
+
+        // Toggle start/stop
+        if (unicastUdpRunning) {
+            unicastUdpRunning = false;
+            if (unicastUdpFuture != null) unicastUdpFuture.cancel(true);
+            SwingUtilities.invokeLater(() -> unicastUdpButton.setText("UDP echo teszt"));
+            appendPacket("[Unicast UDP] Leállítás kérve.");
+            return;
+        }
+
+        unicastUdpRunning = true;
+        SwingUtilities.invokeLater(() -> unicastUdpButton.setText("STOP UDP echo"));
+
+        unicastUdpFuture = backgroundExec.submit(() -> {
+            appendPacket("[Unicast UDP] Folyamatos mérés indul: " + host + ":" + port);
+            while (unicastUdpRunning && !Thread.currentThread().isInterrupted()) {
+                unicastUdpTest(host, port);
+                try { Thread.sleep(250); } catch (InterruptedException ie) { break; }
+            }
+            unicastUdpRunning = false;
+            SwingUtilities.invokeLater(() -> unicastUdpButton.setText("UDP echo teszt"));
+            appendPacket("[Unicast UDP] Folyamatos mérés leállt.");
+        });
     }
 
     private void unicastUdpTest(String host, int port) {
@@ -1076,7 +1113,29 @@ public class NetworkMonitor extends JFrame {
         String ip = addr.getHostAddress();
         String prefix = ip.substring(0, ip.lastIndexOf("."));
         String broadcastIp = prefix + ".255";
-        backgroundExec.submit(() -> broadcastTest(broadcastIp));
+
+        // Toggle start/stop
+        if (broadcastRunning) {
+            broadcastRunning = false;
+            if (broadcastFuture != null) broadcastFuture.cancel(true);
+            SwingUtilities.invokeLater(() -> broadcastTestButton.setText("Broadcast UDP küldése + válaszok figyelése"));
+            appendPacket("[Broadcast UDP] Leállítás kérve.");
+            return;
+        }
+
+        broadcastRunning = true;
+        SwingUtilities.invokeLater(() -> broadcastTestButton.setText("STOP Broadcast teszt"));
+
+        broadcastFuture = backgroundExec.submit(() -> {
+            appendPacket("[Broadcast UDP] Folyamatos mérés indul: " + broadcastIp + ":55555");
+            while (broadcastRunning && !Thread.currentThread().isInterrupted()) {
+                broadcastTest(broadcastIp);
+                try { Thread.sleep(500); } catch (InterruptedException ie) { break; }
+            }
+            broadcastRunning = false;
+            SwingUtilities.invokeLater(() -> broadcastTestButton.setText("Broadcast UDP küldése + válaszok figyelése"));
+            appendPacket("[Broadcast UDP] Folyamatos mérés leállt.");
+        });
     }
 
     private void broadcastTest(String broadcastIp) {
@@ -1133,7 +1192,29 @@ public class NetworkMonitor extends JFrame {
             JOptionPane.showMessageDialog(this, "Adj meg multicast címet!", "Hiba", JOptionPane.ERROR_MESSAGE);
             return;
         }
-        backgroundExec.submit(() -> multicastTest(groupStr, port));
+
+        // Toggle start/stop
+        if (multicastRunning) {
+            multicastRunning = false;
+            if (multicastFuture != null) multicastFuture.cancel(true);
+            SwingUtilities.invokeLater(() -> multicastTestButton.setText("Multicast teszt"));
+            appendPacket("[Multicast] Leállítás kérve.");
+            return;
+        }
+
+        multicastRunning = true;
+        SwingUtilities.invokeLater(() -> multicastTestButton.setText("STOP Multicast"));
+
+        multicastFuture = backgroundExec.submit(() -> {
+            appendPacket("[Multicast] Folyamatos mérés indul: " + groupStr + ":" + port);
+            while (multicastRunning && !Thread.currentThread().isInterrupted()) {
+                multicastTest(groupStr, port);
+                try { Thread.sleep(500); } catch (InterruptedException ie) { break; }
+            }
+            multicastRunning = false;
+            SwingUtilities.invokeLater(() -> multicastTestButton.setText("Multicast teszt"));
+            appendPacket("[Multicast] Folyamatos mérés leállt.");
+        });
     }
 
     private void multicastTest(String groupStr, int port) {
@@ -1190,19 +1271,72 @@ public class NetworkMonitor extends JFrame {
     }
 
     private void onAnycastTest(String ip, String url) {
-        backgroundExec.submit(() -> {
-            appendPacket("[Anycast] Ping + HTTP: " + ip + " / " + url);
-            long pingMs = singlePing(ip);
-            double httpMs = testHttpResponseTime(url);
-            appendPacket("  Ping: " + (pingMs >= 0 ? pingMs + " ms" : "nincs válasz")
-                    + ", HTTP: " + df2.format(httpMs) + " ms");
-            // átlagnak a két érték közül, ha ping hibás, akkor csak HTTP
-            double val;
-            if (pingMs < 0 && httpMs > 0) val = httpMs;
-            else if (pingMs >= 0 && httpMs <= 0) val = pingMs;
-            else if (pingMs >= 0 && httpMs > 0) val = (pingMs + httpMs) / 2.0;
-            else val = 0.0;
-            packetGraphPanel.addPoint("anycast", val);
+
+        // If already running for this target -> stop
+        if (anycastRunning && Objects.equals(anycastIpRunning, ip)) {
+            anycastRunning = false;
+            if (anycastFuture != null) anycastFuture.cancel(true);
+
+            SwingUtilities.invokeLater(() -> {
+                anycastCloudflareButton.setEnabled(true);
+                anycastGoogleButton.setEnabled(true);
+                anycastCloudflareButton.setText("Cloudflare 1.1.1.1");
+                anycastGoogleButton.setText("Google 8.8.8.8");
+            });
+
+            appendPacket("[Anycast] Leállítás kérve: " + ip);
+            return;
+        }
+
+        // If running for another target -> stop it first
+        if (anycastRunning) {
+            anycastRunning = false;
+            if (anycastFuture != null) anycastFuture.cancel(true);
+        }
+
+        anycastRunning = true;
+        anycastIpRunning = ip;
+        anycastUrlRunning = url;
+
+        SwingUtilities.invokeLater(() -> {
+            if ("1.1.1.1".equals(ip)) {
+                anycastCloudflareButton.setText("STOP 1.1.1.1");
+                anycastGoogleButton.setEnabled(false);
+            } else {
+                anycastGoogleButton.setText("STOP 8.8.8.8");
+                anycastCloudflareButton.setEnabled(false);
+            }
+        });
+
+        anycastFuture = backgroundExec.submit(() -> {
+            appendPacket("[Anycast] Folyamatos mérés indul: " + ip + " / " + url);
+            while (anycastRunning && Objects.equals(anycastIpRunning, ip) && !Thread.currentThread().isInterrupted()) {
+                long pingMs = singlePing(ip);
+                double httpMs = testHttpResponseTime(url);
+                appendPacket("  Ping: " + (pingMs >= 0 ? pingMs + " ms" : "nincs válasz")
+                        + ", HTTP: " + df2.format(httpMs) + " ms");
+                double val;
+                if (pingMs < 0 && httpMs > 0) val = httpMs;
+                else if (pingMs >= 0 && httpMs <= 0) val = pingMs;
+                else if (pingMs >= 0 && httpMs > 0) val = (pingMs + httpMs) / 2.0;
+                else val = 0.0;
+                packetGraphPanel.addPoint("anycast", val);
+
+                try { Thread.sleep(1000); } catch (InterruptedException ie) { break; }
+            }
+
+            anycastRunning = false;
+            anycastIpRunning = null;
+            anycastUrlRunning = null;
+
+            SwingUtilities.invokeLater(() -> {
+                anycastCloudflareButton.setEnabled(true);
+                anycastGoogleButton.setEnabled(true);
+                anycastCloudflareButton.setText("Cloudflare 1.1.1.1");
+                anycastGoogleButton.setText("Google 8.8.8.8");
+            });
+
+            appendPacket("[Anycast] Folyamatos mérés leállt.");
         });
     }
 
